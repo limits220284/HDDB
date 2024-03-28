@@ -1,4 +1,4 @@
-# HDDB (Hay's Distributed Key-Value Database)
+# k-v database base on raft
 
 ## 前置知识
 - mapreduce
