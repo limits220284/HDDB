@@ -1,4 +1,4 @@
-# k-v database base on raft
+# KVRaft 【基于Raft的分布式Key/Value数据库】
 
 ## 前置知识
 - mapreduce
