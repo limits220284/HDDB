@@ -9,12 +9,7 @@ package raft
 // test with the original before submitting.
 //
 
-import (
-	"bytes"
-	"sync"
-
-	"6.824/labgob"
-)
+import "sync"
 
 type Persister struct {
 	mu        sync.Mutex
@@ -78,40 +73,4 @@ func (ps *Persister) SnapshotSize() int {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 	return len(ps.snapshot)
-}
-
-func (rf *Raft) WritePersist() []byte {
-	w := new(bytes.Buffer)
-	e := labgob.NewEncoder(w)
-	e.Encode(rf.CurrentTerm)
-	e.Encode(rf.VotedFor)
-	e.Encode(rf.Logs)
-	e.Encode(rf.LastSnapShotIndex)
-	// e.Encode(rf.lastApplied)
-	// e.Encode(rf.commitIndex)
-	data := w.Bytes()
-	return data
-}
-
-func (rf *Raft) readPersist(raftState []byte) {
-	if raftState == nil || len(raftState) < 1 { // bootstrap without any state?
-		return
-	}
-	r := bytes.NewBuffer(raftState)
-	d := labgob.NewDecoder(r)
-	var currentTerm int
-	var votedFor int
-	var logs []Log
-	var lastSnapshotIndex int
-	if d.Decode(&currentTerm) != nil ||
-		d.Decode(&votedFor) != nil ||
-		d.Decode(&logs) != nil ||
-		d.Decode(&lastSnapshotIndex) != nil {
-		println("read Persist.raftstate error")
-	} else {
-		rf.CurrentTerm = currentTerm
-		rf.VotedFor = votedFor
-		rf.Logs = logs
-		rf.LastSnapShotIndex = lastSnapshotIndex
-	}
 }
