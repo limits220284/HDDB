@@ -86,8 +86,10 @@ type Raft struct {
 	electionTimer *Timer
 	applyCh       chan ApplyMsg
 
-	notifyStopCh         chan bool
-	notifyApplyCh        chan bool
+	notifyStopCh   chan bool
+	notifyApplyCh  chan bool
+	notifyCommitCh chan bool
+
 	notifyHeartBeateCh   []chan bool
 	notifyLogReplicateCh []chan bool
 }
@@ -253,16 +255,10 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-// The ticker go routine starts a new election if this peer hasn't received
-// heartsbeats recently.
-func (rf *Raft) ticker() {
-	for rf.killed() == false {
-
-		// Your code here to check if a leader election should
-		// be started and to randomize sleeping time using
-		// time.Sleep().
-
-	}
+func (rf *Raft) notify(ch chan bool) {
+	go func() {
+		ch <- true
+	}()
 }
 
 // the service or tester wants to create a Raft server. the ports
@@ -281,12 +277,36 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
+	rf.applyCh = applyCh
+	rf.electionTimer = &Timer{}
+	rf.electionTimer.reset()
+	rf.matchIndex = make([]int, len(rf.peers))
+	rf.nextIndex = make([]int, len(rf.peers))
+	// rf.log = makeLog
+	rf.currentTerm = 0
+	rf.commitIndex = 0
+	rf.lastApplied = 0
+	rf.role = IFollower
+	rf.votedFor = -1
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
+	rf.notifyCommitCh = make(chan bool, 5)
+	rf.notifyApplyCh = make(chan bool, 5)
+	rf.notifyStopCh = make(chan bool, 5)
+	rf.notifyHeartBeateCh = make([]chan bool, len(rf.peers))
+	rf.notifyLogReplicateCh = make([]chan bool, len(rf.peers))
+	for server, _ := range rf.peers {
+		rf.notifyHeartBeateCh[server] = make(chan bool, 5)
+		rf.notifyLogReplicateCh[server] = make(chan bool, 5)
+	}
 	// start ticker goroutine to start elections
-	go rf.ticker()
+	rf.initHeartBeater() // for heartBeat -- leader
+	// rf.initLogReplicator() // for log replicate -- leader
+	// go rf.applier() // for apply log --all
+	go rf.ticker() // for election --Candidate
+	// go rf.committer() // for commit log -- leader
 
 	return rf
 }
