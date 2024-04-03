@@ -103,7 +103,7 @@ func (rf *Raft) newAppendEntriesArgs(server int) (args *AppendEntriesArgs) {
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) (ok bool, reply *AppendEntriesReply) {
 	reply = &AppendEntriesReply{}
-	// Trace(dTrace, "[%v]sendAppendEntries[%v] %+v %+v %+v", rf.me, server, args)
+	Trace(dTrace, "[%v]sendAppendEntries[%v] %+v %+v %+v", rf.me, server, args)
 	ok = rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -146,6 +146,52 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) (ok bool,
 	return ok, reply
 }
 
+func (rf *Raft) newInstallSnapshotArgs() (args *InstallSnapshotArgs) {
+	snapshot := rf.persister.ReadSnapshot()
+	args = &InstallSnapshotArgs{
+		Term:              rf.currentTerm,
+		LeaderId:          rf.me,
+		LastIncludedIndex: rf.log.LastIncludedIndex,
+		LastIncludedTerm:  rf.log.LastIncludedTerm,
+		Data:              snapshot,
+		Done:              true,
+	}
+	return args
+}
+
+type InstallSnapshotReply struct {
+	Term int
+}
+
+func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs) (ok bool, reply *InstallSnapshotReply) {
+	reply = &InstallSnapshotReply{}
+	Trace(dTrace, "[%v]sendInstallSnapshot[%v] %+v %+v %+v", rf.me, server, args)
+	ok = rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	// 处理RPC回复
+	if ok {
+		// 公共检查
+		if reply.Term > rf.currentTerm {
+			rf.currentTerm = reply.Term
+			rf.role = IFollower
+			rf.votedFor = -1
+			rf.persist()
+			return
+		}
+
+		// 过期消息 || 自身状态已经改变
+		if rf.currentTerm != args.Term || rf.role != ILeader {
+			return
+		}
+
+		rf.nextIndex[server] = args.LastIncludedIndex + 1
+		rf.matchIndex[server] = args.LastIncludedIndex
+	}
+	return ok, reply
+}
 func (rf *Raft) LogReplicate(server int) {
 	rf.mu.Lock()
 	if rf.role == ILeader {
@@ -207,7 +253,7 @@ func (rf *Raft) commit() {
 			if counter >= majority && rf.log.get(N).Term == rf.currentTerm {
 				rf.commitIndex = N
 				hasCommit = true
-				//Debug(dCommit, "[%v]commitIndex %+v", rf.me, rf)
+				// Debug(dCommit, "[%v]commitIndex %+v", rf.me, rf)
 			}
 		}
 		// 通知apply
