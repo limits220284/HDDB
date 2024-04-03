@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"fmt"
 	"time"
 )
 
@@ -14,9 +15,9 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term         int
-	Success      bool
-	ConfictIndex int // Success == false a log that may occure confict
+	Term          int
+	Success       bool
+	ConflictIndex int // Success == false a log that may occure confict
 }
 
 type InstallSnapshotArgs struct {
@@ -26,6 +27,11 @@ type InstallSnapshotArgs struct {
 	LastIncludedTerm  int
 	Data              []byte
 	Done              bool
+}
+
+func (args *InstallSnapshotArgs) String() string {
+	return fmt.Sprintf("{Term:%v, LeaderId:%v, LastIncludedIndex:%v,LastIncludedTerm:%v}",
+		args.Term, args.LeaderId, args.LastIncludedIndex, args.LastIncludedTerm)
 }
 
 func (rf *Raft) heartBeate(server int) {
@@ -135,7 +141,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) (ok bool,
 			rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
 			rf.notify(rf.notifyCommitCh)
 		} else {
-			rf.nextIndex[server] = reply.ConfictIndex + 1
+			rf.nextIndex[server] = reply.ConflictIndex + 1
 			// retry
 			rf.notify(rf.notifyLogReplicateCh[server])
 			// next check to retry
@@ -146,52 +152,75 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) (ok bool,
 	return ok, reply
 }
 
-func (rf *Raft) newInstallSnapshotArgs() (args *InstallSnapshotArgs) {
-	snapshot := rf.persister.ReadSnapshot()
-	args = &InstallSnapshotArgs{
-		Term:              rf.currentTerm,
-		LeaderId:          rf.me,
-		LastIncludedIndex: rf.log.LastIncludedIndex,
-		LastIncludedTerm:  rf.log.LastIncludedTerm,
-		Data:              snapshot,
-		Done:              true,
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	defer Trace(dTrace, "[%v]AppendEntries[%v] %+v %+v %+v", rf.me, args.LeaderId, args, reply, rf)
+
+	// 公共检查
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.role = IFollower
+		rf.votedFor = args.LeaderId
+		rf.persist()
 	}
-	return args
+
+	if args.Term < rf.currentTerm {
+		reply.Success = false
+		reply.Term = rf.currentTerm
+		return
+	}
+
+	rf.electionTimer.reset()
+	rf.role = IFollower
+	rf.votedFor = args.LeaderId
+	rf.persist()
+
+	prevLog := rf.log.get(args.PrevLogIndex)
+
+	// success == false
+	if prevLog == nil {
+		reply.ConflictIndex = rf.log.last().Index
+		reply.Success = false
+		reply.Term = rf.currentTerm
+		return
+	}
+	// success == false
+	if prevLog.Term != args.PrevLogTerm {
+		i := args.PrevLogIndex
+		// 跳过一个 term,因为当前PrevLogTerm的所有log都是冲突的
+		for i = args.PrevLogIndex; i > rf.log.LastIncludedIndex; i-- {
+			if rf.log.get(i).Term != prevLog.Term {
+				break
+			}
+		}
+		reply.ConflictIndex = i
+		reply.Success = false
+		reply.Term = rf.currentTerm
+		return
+	}
+
+	//Debug(dInfo, "[%v] AppendEntries %+v %+v %+v", rf.me, prevLog, args)
+
+	// success == true
+	rf.log.rewrite(args.PrevLogIndex+1, args.Entries)
+	rf.persist()
+	if args.LeaderCommit > rf.commitIndex {
+		rf.commitIndex = min(args.LeaderCommit, rf.log.last().Index)
+		//通知commit
+		rf.notify(rf.notifyCommitCh)
+	}
+
+	reply.Success = true
+	reply.Term = rf.currentTerm
+
+	return
 }
 
 type InstallSnapshotReply struct {
 	Term int
 }
 
-func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs) (ok bool, reply *InstallSnapshotReply) {
-	reply = &InstallSnapshotReply{}
-	Trace(dTrace, "[%v]sendInstallSnapshot[%v] %+v %+v %+v", rf.me, server, args)
-	ok = rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
-
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
-	// 处理RPC回复
-	if ok {
-		// 公共检查
-		if reply.Term > rf.currentTerm {
-			rf.currentTerm = reply.Term
-			rf.role = IFollower
-			rf.votedFor = -1
-			rf.persist()
-			return
-		}
-
-		// 过期消息 || 自身状态已经改变
-		if rf.currentTerm != args.Term || rf.role != ILeader {
-			return
-		}
-
-		rf.nextIndex[server] = args.LastIncludedIndex + 1
-		rf.matchIndex[server] = args.LastIncludedIndex
-	}
-	return ok, reply
-}
 func (rf *Raft) LogReplicate(server int) {
 	rf.mu.Lock()
 	if rf.role == ILeader {
