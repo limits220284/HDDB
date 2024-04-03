@@ -145,3 +145,92 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) (ok bool,
 	}
 	return ok, reply
 }
+
+func (rf *Raft) LogReplicate(server int) {
+	rf.mu.Lock()
+	if rf.role == ILeader {
+		if rf.nextIndex[server] <= rf.log.LastIncludedIndex {
+			// install snapshot
+			args := rf.newInstallSnapshotArgs()
+			go rf.sendInstallSnapshot(server, args)
+		} else if rf.log.last().Index >= rf.nextIndex[server] {
+			// AppendEntries
+			args := rf.newAppendEntriesArgs(server)
+			go rf.sendAppendEntries(server, args)
+		}
+	}
+	rf.mu.Unlock()
+}
+
+func (rf *Raft) LogReplicator(server int) {
+	checkTimer := time.NewTimer(CheckPeriods)
+	defer checkTimer.Stop()
+	for rf.killed() == false {
+		select {
+		case <-rf.notifyStopCh:
+			return
+		case <-checkTimer.C:
+			rf.notify(rf.notifyLogReplicateCh[server])
+		case <-rf.notifyLogReplicateCh[server]:
+			rf.LogReplicate(server)
+			checkTimer.Reset(CheckPeriods)
+		}
+	}
+}
+
+func (rf *Raft) initLogReplicator() {
+	for server, _ := range rf.peers {
+		if server == rf.me {
+			continue
+		}
+		go rf.LogReplicator(server)
+	}
+}
+
+func (rf *Raft) commit() {
+	rf.mu.Lock()
+
+	if rf.role == ILeader {
+		hasCommit := false
+		for N := rf.commitIndex + 1; N <= rf.log.last().Index; N++ {
+			majority := len(rf.peers)/2 + 1
+			counter := 1
+			for i, _ := range rf.peers {
+				if i == rf.me {
+					continue
+				}
+				if rf.matchIndex[i] >= N {
+					counter++
+				}
+			}
+
+			if counter >= majority && rf.log.get(N).Term == rf.currentTerm {
+				rf.commitIndex = N
+				hasCommit = true
+				//Debug(dCommit, "[%v]commitIndex %+v", rf.me, rf)
+			}
+		}
+		// 通知apply
+		if hasCommit {
+			rf.notify(rf.notifyApplyCh)
+		}
+	}
+	rf.mu.Unlock()
+
+}
+
+func (rf *Raft) committer() {
+	checkTimer := time.NewTimer(CheckPeriods)
+	defer checkTimer.Stop()
+	for rf.killed() == false {
+		select {
+		case <-rf.notifyStopCh:
+			return
+		case <-checkTimer.C:
+			rf.notify(rf.notifyCommitCh)
+		case <-rf.notifyCommitCh:
+			rf.commit()
+			checkTimer.Reset(CheckPeriods)
+		}
+	}
+}

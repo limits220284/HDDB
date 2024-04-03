@@ -292,6 +292,64 @@ func (rf *Raft) notify(ch chan bool) {
 	}()
 }
 
+func (rf *Raft) apply() {
+	rf.mu.Lock()
+
+	// 根据快照更新状态，一般出现的情况有两种:
+	// 1.奔溃重启时，自己使用快照恢复
+	// 2.收到Install Snapshot RPC，安装快照
+	// 由于当前状态小于快照状态，直接更新为快照状态
+	if rf.lastApplied < rf.log.LastIncludedIndex {
+		applyMsg := ApplyMsg{
+			CommandValid:  false,
+			SnapshotValid: true,
+			Snapshot:      rf.persister.ReadSnapshot(),
+			SnapshotTerm:  rf.log.LastIncludedTerm,
+			SnapshotIndex: rf.log.LastIncludedIndex,
+		}
+		rf.lastApplied = rf.log.LastIncludedIndex
+		rf.mu.Unlock()
+		rf.applyCh <- applyMsg
+		// continue
+		rf.notify(rf.notifyApplyCh)
+		return
+	}
+
+	// 根据commitIndex更新状态
+	if rf.lastApplied < rf.commitIndex {
+		rf.lastApplied++
+		logEntry := rf.log.get(rf.lastApplied)
+		Info(dLog, "[%v] applier %+v %+v", rf.me, rf.lastApplied, rf)
+		applyMsg := ApplyMsg{
+			CommandValid: true,
+			Command:      logEntry.Command,
+			CommandIndex: rf.lastApplied,
+		}
+		rf.mu.Unlock()
+		rf.applyCh <- applyMsg
+		// continue
+		rf.notify(rf.notifyApplyCh)
+		return
+	}
+	rf.mu.Unlock()
+}
+
+func (rf *Raft) applier() {
+	checkTimer := time.NewTimer(CheckPeriods)
+	defer checkTimer.Stop()
+	for rf.killed() == false {
+		select {
+		case <-rf.notifyStopCh:
+			return
+		case <-checkTimer.C:
+			rf.notify(rf.notifyApplyCh)
+		case <-rf.notifyApplyCh:
+			rf.apply()
+			checkTimer.Reset(CheckPeriods)
+		}
+	}
+}
+
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays
@@ -333,11 +391,11 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 		rf.notifyLogReplicateCh[server] = make(chan bool, 5)
 	}
 	// start ticker goroutine to start elections
-	rf.initHeartBeater() // for heartBeat -- leader
-	// rf.initLogReplicator() // for log replicate -- leader
-	// go rf.applier() // for apply log --all
-	go rf.ticker() // for election --Candidate
-	// go rf.committer() // for commit log -- leader
+	rf.initHeartBeater()   // for heartBeat -- leader
+	rf.initLogReplicator() // for log replicate -- leader
+	go rf.applier()        // for apply log --all
+	go rf.ticker()         // for election --Candidate
+	go rf.committer()      // for commit log -- leader
 
 	return rf
 }
