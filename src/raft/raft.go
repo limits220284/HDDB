@@ -380,6 +380,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	Info(dInfo, "[%v] Make: %v", rf)
 
 	rf.notifyCommitCh = make(chan bool, 5)
 	rf.notifyApplyCh = make(chan bool, 5)
