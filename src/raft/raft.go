@@ -77,13 +77,16 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-	currentTerm   int
-	votedFor      int
-	log           *LogCache
-	commitIndex   int
-	lastApplied   int
-	nextIndex     []int
-	matchIndex    []int
+	currentTerm int
+	votedFor    int
+	log         *LogCache
+
+	commitIndex int
+	lastApplied int
+
+	nextIndex  []int
+	matchIndex []int
+
 	role          Role // current status
 	electionTimer *Timer
 	applyCh       chan ApplyMsg
@@ -112,6 +115,12 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (2A).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	term = rf.currentTerm
+	if rf.role == ILeader {
+		isleader = true
+	}
 	return term, isleader
 }
 
@@ -185,38 +194,6 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	return true
 }
 
-// the service says it has created a snapshot that has
-// all info up to and including index. this means the
-// service no longer needs the log through (and including)
-// that index. Raft should now trim its log as much as possible.
-func (rf *Raft) Snapshot(index int, snapshot []byte) {
-	// Your code here (2D).
-
-}
-
-// example RequestVote RPC arguments structure.
-// field names must start with capital letters!
-type RequestVoteArgs struct {
-	// Your data here (2A, 2B).
-	Term         int // Candidate's Term
-	CandidateId  int // Candidate requesting vote
-	LastLogIndex int // index of candidate's last log entry
-	LastLogTerm  int // term of Candidate's last Term?
-}
-
-// example RequestVote RPC reply structure.
-// field names must start with capital letters!
-type RequestVoteReply struct {
-	// Your data here (2A).
-	Term        int  // currentTerm, for candidate to update itself
-	VoteGranted bool // true means candidate received vote
-}
-
-// example RequestVote RPC handler.
-func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here (2A, 2B).
-}
-
 // example code to send a RequestVote RPC to a server.
 // server is the index of the target server in rf.peers[].
 // expects RPC arguments in args.
@@ -263,6 +240,32 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if rf.killed() || rf.role != ILeader {
+		return index, term, false
+	}
+	Info(dInfo, "[%v] start %+v", rf.me, rf)
+
+	newLogEntry := &LogEntry{
+		Index:   rf.log.last().Index + 1,
+		Term:    rf.currentTerm,
+		Command: command,
+	}
+	rf.log.append(newLogEntry)
+	rf.persist()
+	//send AppendEntries RPC
+	for server, _ := range rf.peers {
+		if server == rf.me {
+			continue
+		}
+		rf.notify(rf.notifyLogReplicateCh[server])
+	}
+
+	index = rf.log.last().Index
+	term = rf.log.last().Term
+	isLeader = true
 
 	return index, term, isLeader
 }
@@ -371,7 +374,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	rf.electionTimer.reset()
 	rf.matchIndex = make([]int, len(rf.peers))
 	rf.nextIndex = make([]int, len(rf.peers))
-	// rf.log = makeLog
+	rf.log = makeLogCache(0, 0)
 	rf.currentTerm = 0
 	rf.commitIndex = 0
 	rf.lastApplied = 0
@@ -407,6 +410,10 @@ type LogEntry struct {
 	Command interface{}
 }
 
+func (l *LogEntry) String() string {
+	return fmt.Sprintf("{Index:%d, Term:%d}", l.Index, l.Term)
+}
+
 // logCache
 // 1. Logs[0] store LastIncludedIndex, LastIncludedIndex's LogEntry
 // 2. Logs[] nerver will be nil, because the first point
@@ -415,6 +422,14 @@ type LogCache struct {
 	Logs              []*LogEntry
 	LastIncludedIndex int
 	LastIncludedTerm  int
+}
+
+func makeLogCache(lastIncludedIndex int, lastIncludedTerm int) *LogCache {
+	l := &LogCache{}
+	l.Logs = []*LogEntry{{Index: lastIncludedIndex, Term: lastIncludedTerm, Command: nil}}
+	l.LastIncludedIndex = lastIncludedIndex
+	l.LastIncludedTerm = lastIncludedTerm
+	return l
 }
 
 // return index's LogEntry
@@ -436,4 +451,30 @@ func (l *LogCache) after(index int) []*LogEntry {
 	i := index - l.LastIncludedIndex
 	copy(copyData, l.Logs[i+1:])
 	return copyData
+}
+
+func (l *LogCache) append(newEntry ...*LogEntry) {
+	l.Logs = append(l.Logs, newEntry...)
+}
+
+func (l *LogCache) rewrite(index int, newEntries []*LogEntry) {
+	i := 0
+	for i = 0; i < len(newEntries); i++ {
+		newEntry := newEntries[i]
+		exitEntry := l.get(index + i)
+		if exitEntry == nil {
+			break
+		}
+		if newEntry.Term != exitEntry.Term {
+			//entry conflicts
+			l.Logs = l.Logs[:exitEntry.Index-l.LastIncludedIndex]
+			break
+		}
+	}
+	if i < len(newEntries) {
+		copyData := make([]*LogEntry, len(newEntries))
+		copy(copyData, newEntries)
+		l.Logs = append(l.Logs, copyData[i:]...)
+	}
+	return
 }
